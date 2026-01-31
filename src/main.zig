@@ -12,9 +12,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = gpa.allocator();
 
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
     const pseudo_terminal_fd = std.posix.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0) catch unreachable;
 
     var unlock: c_int = 0;
@@ -31,8 +28,6 @@ pub fn main() !void {
         return;
     }
 
-    std.debug.print("Slave terminal /dev/pts/{d}\n", .{slave_terminal_num});
-
     const pid = try std.posix.fork();
     if (pid == 0) {
         const path = std.fmt.allocPrint(allocator, "/dev/pts/{d}", .{slave_terminal_num}) catch unreachable;
@@ -47,9 +42,9 @@ pub fn main() !void {
             return;
         }
 
-        try std.posix.dup2(slave_terminal_fd, 0);
-        try std.posix.dup2(slave_terminal_fd, 1);
-        try std.posix.dup2(slave_terminal_fd, 2);
+        try std.posix.dup2(slave_terminal_fd, std.posix.STDIN_FILENO);
+        try std.posix.dup2(slave_terminal_fd, std.posix.STDOUT_FILENO);
+        try std.posix.dup2(slave_terminal_fd, std.posix.STDERR_FILENO);
 
         const shell = std.posix.getenvZ("SHELL") orelse "/bin/sh";
 
@@ -63,6 +58,14 @@ pub fn main() !void {
             .{ .fd = pseudo_terminal_fd, .events = std.posix.POLL.IN, .revents = 0 }, // master
         };
         var buf: [1024]u8 = undefined;
+
+        // TODO handle error
+        const original_tc_attrs = std.posix.tcgetattr(std.posix.STDIN_FILENO) catch unreachable;
+        var tc_attrs = original_tc_attrs;
+        tc_attrs.lflag.ECHO = false;
+        tc_attrs.lflag.ICANON = false;
+        tc_attrs.lflag.ISIG = false;
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, tc_attrs) catch unreachable;
 
         while (true) {
             const TIMEOUT = -1; // Wait forever
@@ -86,5 +89,8 @@ pub fn main() !void {
                 break;
             }
         }
+
+        // TODO handle error
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, original_tc_attrs) catch unreachable;
     }
 }
