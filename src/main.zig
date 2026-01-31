@@ -30,12 +30,10 @@ pub fn main() !void {
 
     const pid = try std.posix.fork();
     if (pid == 0) {
+        // CHILD
         const path = std.fmt.allocPrint(allocator, "/dev/pts/{d}", .{slave_terminal_num}) catch unreachable;
         const slave_terminal_fd = std.posix.open(path, .{ .ACCMODE = .RDWR }, 0) catch unreachable;
-        // CHILD - everything from setsid() onward goes here
         _ = std.os.linux.setsid();
-        // ... open slave, TIOCSCTTY, dup2 ...
-        // ... then exec the shell (we haven't done this yet)
         const set_controlling_tty_ret = std.os.linux.ioctl(slave_terminal_fd, TIOCSCTTY, 0);
         if (set_controlling_tty_ret != 0) {
             std.debug.print("TIOCSCTTY error code {d}", .{set_controlling_tty_ret});
@@ -53,6 +51,7 @@ pub fn main() !void {
         // TODO handle error
         return std.posix.execvpeZ(shell, &argv, &envp);
     } else {
+        // Master
         var fds = [_]std.posix.pollfd{
             .{ .fd = 0, .events = std.posix.POLL.IN, .revents = 0 }, // stdin
             .{ .fd = pseudo_terminal_fd, .events = std.posix.POLL.IN, .revents = 0 }, // master
@@ -75,7 +74,6 @@ pub fn main() !void {
                 // TODO handle error
                 const bytes_read = std.posix.read(fds[0].fd, &buf) catch unreachable;
                 _ = std.posix.write(fds[1].fd, buf[0..bytes_read]) catch unreachable;
-                // Write to fds[1]
             }
             if (fds[0].revents & std.posix.POLL.HUP != 0) {
                 break;
@@ -83,7 +81,6 @@ pub fn main() !void {
             if (fds[1].revents & std.posix.POLL.IN != 0) {
                 const bytes_read = std.posix.read(fds[1].fd, &buf) catch unreachable;
                 _ = std.posix.write(fds[0].fd, buf[0..bytes_read]) catch unreachable;
-                // Write to fds[0]
             }
             if (fds[1].revents & std.posix.POLL.HUP != 0) {
                 break;
