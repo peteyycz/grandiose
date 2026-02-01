@@ -48,6 +48,7 @@ pub const Action = union(enum) {
     erase_display: EraseMode,
     erase_line: EraseMode,
     sgr: SgrAttribute,
+    cursor_visible: bool,
 };
 
 const State = enum { ground, escape, csi_state };
@@ -159,7 +160,15 @@ pub const Parser = struct {
         self.state = .ground;
         defer self.csi_parameters_len = 0;
 
-        const params = csiParamParser.parse(self.csi_parameters[0..self.csi_parameters_len]);
+        const raw_params = self.csi_parameters[0..self.csi_parameters_len];
+
+        // Check for private mode sequences (starting with ?)
+        if (raw_params.len > 0 and raw_params[0] == '?') {
+            const params = csiParamParser.parse(raw_params[1..]);
+            return self.dispatchPrivateCsi(byte, params);
+        }
+
+        const params = csiParamParser.parse(raw_params);
 
         return switch (byte) {
             'H' => .{ .move_cursor = .{
@@ -188,6 +197,18 @@ pub const Parser = struct {
             'm' => .{ .sgr = parseSgr(params) },
             else => .none,
         };
+    }
+
+    fn dispatchPrivateCsi(_: *Parser, byte: u8, params: csiParamParser.ParseResult) Action {
+        if (params.len >= 1 and params.params[0] == 25) {
+            // ?25h = show cursor, ?25l = hide cursor
+            return switch (byte) {
+                'h' => .{ .cursor_visible = true },
+                'l' => .{ .cursor_visible = false },
+                else => .none,
+            };
+        }
+        return .none;
     }
 };
 
@@ -302,4 +323,14 @@ test "ESC[38;2;R;G;Bm true color mode" {
         .fg_rgb = .{ .r = 255, .g = 0, .b = 0 },
         .bg_rgb = .{ .r = 0, .g = 255, .b = 0 },
     } }, parser.feedSlice("\x1b[1;38;2;255;0;0;48;2;0;255;0m"));
+}
+
+test "ESC[?25h/l cursor visibility" {
+    var parser = Parser{};
+
+    // Show cursor
+    try std.testing.expectEqual(Action{ .cursor_visible = true }, parser.feedSlice("\x1b[?25h"));
+
+    // Hide cursor
+    try std.testing.expectEqual(Action{ .cursor_visible = false }, parser.feedSlice("\x1b[?25l"));
 }
