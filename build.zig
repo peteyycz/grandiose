@@ -35,9 +35,29 @@ pub fn build(b: *std.Build) void {
     });
     const run_csi_parser_tests = b.addRunArtifact(csi_parser_tests);
 
+    const screen_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/screen.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_screen_tests = b.addRunArtifact(screen_tests);
+
+    const render_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/render.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_render_tests = b.addRunArtifact(render_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_parser_tests.step);
     test_step.dependOn(&run_csi_parser_tests.step);
+    test_step.dependOn(&run_screen_tests.step);
+    test_step.dependOn(&run_render_tests.step);
 
     const run_step = b.step("run", "Run grandiose");
     const run_cmd = b.addRunArtifact(exe);

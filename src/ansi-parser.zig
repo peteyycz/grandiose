@@ -51,7 +51,7 @@ pub const Action = union(enum) {
     cursor_visible: bool,
 };
 
-const State = enum { ground, escape, csi_state };
+const State = enum { ground, escape, csi_state, utf8 };
 
 fn parseSgr(params: csiParamParser.ParseResult) SgrAttribute {
     var attr = SgrAttribute{};
@@ -118,7 +118,30 @@ pub const Parser = struct {
     csi_parameters: [32]u8 = undefined,
     csi_parameters_len: u8 = 0,
 
+    // UTF-8 multi-byte handling
+    utf8_buf: [4]u8 = undefined,
+    utf8_len: u8 = 0,
+    utf8_expected: u8 = 0,
+
     pub fn feed(self: *Parser, byte: u8) Action {
+        // Handle UTF-8 continuation bytes
+        if (self.state == .utf8) {
+            if (byte >= 0x80 and byte <= 0xBF) {
+                self.utf8_buf[self.utf8_len] = byte;
+                self.utf8_len += 1;
+                if (self.utf8_len == self.utf8_expected) {
+                    self.state = .ground;
+                    const codepoint = std.unicode.utf8Decode(self.utf8_buf[0..self.utf8_len]) catch return .none;
+                    return .{ .print = codepoint };
+                }
+                return .none;
+            } else {
+                // Invalid continuation, reset and process this byte normally
+                self.state = .ground;
+                self.utf8_len = 0;
+            }
+        }
+
         return switch (byte) {
             '\r' => .carriage_return,
             '\n' => .line_feed,
@@ -141,9 +164,35 @@ pub const Parser = struct {
                         return .none;
                     },
                 },
+                .utf8 => .none, // Already handled above
             },
             0x1B => {
                 self.state = .escape;
+                return .none;
+            },
+            // UTF-8 multi-byte sequence starts
+            0xC0...0xDF => {
+                // 2-byte sequence
+                self.state = .utf8;
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 2;
+                return .none;
+            },
+            0xE0...0xEF => {
+                // 3-byte sequence
+                self.state = .utf8;
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 3;
+                return .none;
+            },
+            0xF0...0xF7 => {
+                // 4-byte sequence
+                self.state = .utf8;
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 4;
                 return .none;
             },
             else => .none,
@@ -333,4 +382,22 @@ test "ESC[?25h/l cursor visibility" {
 
     // Hide cursor
     try std.testing.expectEqual(Action{ .cursor_visible = false }, parser.feedSlice("\x1b[?25l"));
+}
+
+test "UTF-8 multi-byte characters" {
+    var parser = Parser{};
+
+    // ❯ is U+276F, encoded as 0xE2 0x9D 0xAF (3 bytes)
+    try std.testing.expectEqual(Action.none, parser.feed(0xE2));
+    try std.testing.expectEqual(Action.none, parser.feed(0x9D));
+    try std.testing.expectEqual(Action{ .print = 0x276F }, parser.feed(0xAF));
+
+    // € is U+20AC, encoded as 0xE2 0x82 0xAC (3 bytes)
+    try std.testing.expectEqual(Action{ .print = 0x20AC }, parser.feedSlice("\xe2\x82\xac"));
+
+    // 2-byte: é is U+00E9, encoded as 0xC3 0xA9
+    try std.testing.expectEqual(Action{ .print = 0x00E9 }, parser.feedSlice("\xc3\xa9"));
+
+    // 4-byte: 😀 is U+1F600, encoded as 0xF0 0x9F 0x98 0x80
+    try std.testing.expectEqual(Action{ .print = 0x1F600 }, parser.feedSlice("\xf0\x9f\x98\x80"));
 }
