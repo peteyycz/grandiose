@@ -4,6 +4,34 @@ const csiParamParser = @import("csi-parameter-parser.zig");
 
 pub const MoveCursorRelativeDirection = enum { up, down, left, right };
 pub const EraseMode = enum { to_end, to_start, all };
+pub const Color = enum(u8) {
+    black = 0,
+    red = 1,
+    green = 2,
+    yellow = 3,
+    blue = 4,
+    magenta = 5,
+    cyan = 6,
+    white = 7,
+    bright_black = 8,
+    bright_red = 9,
+    bright_green = 10,
+    bright_yellow = 11,
+    bright_blue = 12,
+    bright_magenta = 13,
+    bright_cyan = 14,
+    bright_white = 15,
+};
+pub const Rgb = struct { r: u8, g: u8, b: u8 };
+pub const SgrAttribute = struct {
+    reset: bool = false,
+    bold: ?bool = null,
+    underline: ?bool = null,
+    fg_color: ?u8 = null,
+    bg_color: ?u8 = null,
+    fg_rgb: ?Rgb = null,
+    bg_rgb: ?Rgb = null,
+};
 
 pub const Action = union(enum) {
     none,
@@ -19,14 +47,74 @@ pub const Action = union(enum) {
     move_cursor_relative: struct { dir: MoveCursorRelativeDirection, n: u16 },
     erase_display: EraseMode,
     erase_line: EraseMode,
+    sgr: SgrAttribute,
 };
 
 const State = enum { ground, escape, csi_state };
 
+fn parseSgr(params: csiParamParser.ParseResult) SgrAttribute {
+    var attr = SgrAttribute{};
+
+    // ESC[m with no params means reset
+    if (params.len == 0) {
+        attr.reset = true;
+        return attr;
+    }
+
+    var i: u8 = 0;
+    while (i < params.len) : (i += 1) {
+        const p = params.params[i];
+        switch (p) {
+            0 => attr.reset = true,
+            1 => attr.bold = true,
+            4 => attr.underline = true,
+            22 => attr.bold = false,
+            24 => attr.underline = false,
+            30...37 => attr.fg_color = @intCast(p - 30),
+            40...47 => attr.bg_color = @intCast(p - 40),
+            90...97 => attr.fg_color = @intCast(p - 90 + 8),
+            100...107 => attr.bg_color = @intCast(p - 100 + 8),
+            38 => {
+                if (i + 2 < params.len and params.params[i + 1] == 5) {
+                    // 256-color foreground: 38;5;N
+                    attr.fg_color = @intCast(params.params[i + 2]);
+                    i += 2;
+                } else if (i + 4 < params.len and params.params[i + 1] == 2) {
+                    // True color foreground: 38;2;R;G;B
+                    attr.fg_rgb = .{
+                        .r = @intCast(params.params[i + 2]),
+                        .g = @intCast(params.params[i + 3]),
+                        .b = @intCast(params.params[i + 4]),
+                    };
+                    i += 4;
+                }
+            },
+            48 => {
+                if (i + 2 < params.len and params.params[i + 1] == 5) {
+                    // 256-color background: 48;5;N
+                    attr.bg_color = @intCast(params.params[i + 2]);
+                    i += 2;
+                } else if (i + 4 < params.len and params.params[i + 1] == 2) {
+                    // True color background: 48;2;R;G;B
+                    attr.bg_rgb = .{
+                        .r = @intCast(params.params[i + 2]),
+                        .g = @intCast(params.params[i + 3]),
+                        .b = @intCast(params.params[i + 4]),
+                    };
+                    i += 4;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return attr;
+}
+
 pub const Parser = struct {
     state: State = .ground,
 
-    csi_parameters: [10]u8 = undefined,
+    csi_parameters: [32]u8 = undefined,
     csi_parameters_len: u8 = 0,
 
     pub fn feed(self: *Parser, byte: u8) Action {
@@ -97,6 +185,7 @@ pub const Parser = struct {
                 };
                 break :blk if (byte == 'J') .{ .erase_display = mode } else .{ .erase_line = mode };
             },
+            'm' => .{ .sgr = parseSgr(params) },
             else => .none,
         };
     }
@@ -145,4 +234,72 @@ test "ESC[K erase line" {
     var parser = Parser{};
     try std.testing.expectEqual(Action{ .erase_line = .to_end }, parser.feedSlice("\x1b[K"));
     try std.testing.expectEqual(Action{ .erase_line = .all }, parser.feedSlice("\x1b[2K"));
+}
+
+test "ESC[m SGR attributes" {
+    var parser = Parser{};
+
+    // Reset
+    try std.testing.expectEqual(Action{ .sgr = .{ .reset = true } }, parser.feedSlice("\x1b[m"));
+    try std.testing.expectEqual(Action{ .sgr = .{ .reset = true } }, parser.feedSlice("\x1b[0m"));
+
+    // Bold
+    try std.testing.expectEqual(Action{ .sgr = .{ .bold = true } }, parser.feedSlice("\x1b[1m"));
+
+    // Underline
+    try std.testing.expectEqual(Action{ .sgr = .{ .underline = true } }, parser.feedSlice("\x1b[4m"));
+
+    // Foreground colors (basic 8)
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = @intFromEnum(Color.red) } }, parser.feedSlice("\x1b[31m"));
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = @intFromEnum(Color.green) } }, parser.feedSlice("\x1b[32m"));
+
+    // Bright foreground
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = @intFromEnum(Color.bright_red) } }, parser.feedSlice("\x1b[91m"));
+
+    // Background colors
+    try std.testing.expectEqual(Action{ .sgr = .{ .bg_color = @intFromEnum(Color.blue) } }, parser.feedSlice("\x1b[44m"));
+    try std.testing.expectEqual(Action{ .sgr = .{ .bg_color = @intFromEnum(Color.bright_cyan) } }, parser.feedSlice("\x1b[106m"));
+
+    // Combined: bold + red fg + blue bg
+    try std.testing.expectEqual(Action{ .sgr = .{
+        .bold = true,
+        .fg_color = @intFromEnum(Color.red),
+        .bg_color = @intFromEnum(Color.blue),
+    } }, parser.feedSlice("\x1b[1;31;44m"));
+}
+
+test "ESC[38;5;Nm 256-color mode" {
+    var parser = Parser{};
+
+    // 256-color foreground
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = 196 } }, parser.feedSlice("\x1b[38;5;196m"));
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = 0 } }, parser.feedSlice("\x1b[38;5;0m"));
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_color = 255 } }, parser.feedSlice("\x1b[38;5;255m"));
+
+    // 256-color background
+    try std.testing.expectEqual(Action{ .sgr = .{ .bg_color = 21 } }, parser.feedSlice("\x1b[48;5;21m"));
+
+    // Combined: bold + 256-color fg + 256-color bg
+    try std.testing.expectEqual(Action{ .sgr = .{
+        .bold = true,
+        .fg_color = 196,
+        .bg_color = 21,
+    } }, parser.feedSlice("\x1b[1;38;5;196;48;5;21m"));
+}
+
+test "ESC[38;2;R;G;Bm true color mode" {
+    var parser = Parser{};
+
+    // True color foreground
+    try std.testing.expectEqual(Action{ .sgr = .{ .fg_rgb = .{ .r = 255, .g = 128, .b = 0 } } }, parser.feedSlice("\x1b[38;2;255;128;0m"));
+
+    // True color background
+    try std.testing.expectEqual(Action{ .sgr = .{ .bg_rgb = .{ .r = 0, .g = 0, .b = 255 } } }, parser.feedSlice("\x1b[48;2;0;0;255m"));
+
+    // Combined: bold + true color fg + true color bg
+    try std.testing.expectEqual(Action{ .sgr = .{
+        .bold = true,
+        .fg_rgb = .{ .r = 255, .g = 0, .b = 0 },
+        .bg_rgb = .{ .r = 0, .g = 255, .b = 0 },
+    } }, parser.feedSlice("\x1b[1;38;2;255;0;0;48;2;0;255;0m"));
 }
