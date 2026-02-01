@@ -1,0 +1,148 @@
+const std = @import("std");
+
+const csiParamParser = @import("csi-parameter-parser.zig");
+
+pub const MoveCursorRelativeDirection = enum { up, down, left, right };
+pub const EraseMode = enum { to_end, to_start, all };
+
+pub const Action = union(enum) {
+    none,
+    print: u21,
+    carriage_return,
+    line_feed,
+    backspace,
+    tab,
+    bell,
+
+    // Controls
+    move_cursor: struct { x: u16, y: u16 },
+    move_cursor_relative: struct { dir: MoveCursorRelativeDirection, n: u16 },
+    erase_display: EraseMode,
+    erase_line: EraseMode,
+};
+
+const State = enum { ground, escape, csi_state };
+
+pub const Parser = struct {
+    state: State = .ground,
+
+    csi_parameters: [10]u8 = undefined,
+    csi_parameters_len: u8 = 0,
+
+    pub fn feed(self: *Parser, byte: u8) Action {
+        return switch (byte) {
+            '\r' => .carriage_return,
+            '\n' => .line_feed,
+            0x08 => .backspace,
+            '\t' => .tab,
+            0x07 => .bell,
+            0x20...0x7E => switch (self.state) {
+                .ground => .{ .print = byte },
+                .escape => {
+                    if (byte == '[') {
+                        self.state = .csi_state;
+                    }
+                    return .none;
+                },
+                .csi_state => switch (byte) {
+                    0x40...0x7E => self.dispatchCsi(byte),
+                    else => {
+                        self.csi_parameters[self.csi_parameters_len] = byte;
+                        self.csi_parameters_len += 1;
+                        return .none;
+                    },
+                },
+            },
+            0x1B => {
+                self.state = .escape;
+                return .none;
+            },
+            else => .none,
+        };
+    }
+
+    pub fn feedSlice(self: *Parser, bytes: []const u8) Action {
+        var result: Action = .none;
+        for (bytes) |b| result = self.feed(b);
+        return result;
+    }
+
+    fn dispatchCsi(self: *Parser, byte: u8) Action {
+        self.state = .ground;
+        defer self.csi_parameters_len = 0;
+
+        const params = csiParamParser.parse(self.csi_parameters[0..self.csi_parameters_len]);
+
+        return switch (byte) {
+            'H' => .{ .move_cursor = .{
+                .x = if (params.len >= 1) params.params[0] else 0,
+                .y = if (params.len >= 2) params.params[1] else 0,
+            } },
+            'A', 'B', 'C', 'D' => .{ .move_cursor_relative = .{
+                .dir = switch (byte) {
+                    'A' => .up,
+                    'B' => .down,
+                    'C' => .right,
+                    'D' => .left,
+                    else => unreachable,
+                },
+                .n = if (params.len >= 1) params.params[0] else 1,
+            } },
+            'J', 'K' => blk: {
+                const mode: EraseMode = switch (if (params.len >= 1) params.params[0] else 0) {
+                    0 => .to_end,
+                    1 => .to_start,
+                    2 => .all,
+                    else => .to_end,
+                };
+                break :blk if (byte == 'J') .{ .erase_display = mode } else .{ .erase_line = mode };
+            },
+            else => .none,
+        };
+    }
+};
+
+test "printable character emits print action" {
+    var parser = Parser{};
+    try std.testing.expectEqual(parser.feed('e'), Action{ .print = 'e' });
+    try std.testing.expectEqual(parser.feed('c'), Action{ .print = 'c' });
+    try std.testing.expectEqual(parser.feed('h'), Action{ .print = 'h' });
+    try std.testing.expectEqual(parser.feed('o'), Action{ .print = 'o' });
+}
+
+test "single byte special characters" {
+    var parser = Parser{};
+    try std.testing.expectEqual(parser.feed('\r'), Action.carriage_return);
+    try std.testing.expectEqual(parser.feed('\n'), Action.line_feed);
+    try std.testing.expectEqual(parser.feed(0x08), Action.backspace);
+    try std.testing.expectEqual(parser.feed('\t'), Action.tab);
+    try std.testing.expectEqual(parser.feed(0x07), Action.bell);
+}
+
+test "ESC[H escape sequence" {
+    var parser = Parser{};
+    try std.testing.expectEqual(Action{ .move_cursor = .{ .x = 0, .y = 0 } }, parser.feedSlice("\x1b[H"));
+    try std.testing.expectEqual(Action{ .move_cursor = .{ .x = 10, .y = 93 } }, parser.feedSlice("\x1b[10;93H"));
+}
+
+test "ESC[1A/B/C/D escape sequence" {
+    var parser = Parser{};
+    try std.testing.expectEqual(Action{ .move_cursor_relative = .{ .dir = .up, .n = 1 } }, parser.feedSlice("\x1b[1A"));
+    try std.testing.expectEqual(Action{ .move_cursor_relative = .{ .dir = .down, .n = 5 } }, parser.feedSlice("\x1b[5B"));
+    try std.testing.expectEqual(Action{ .move_cursor_relative = .{ .dir = .right, .n = 3 } }, parser.feedSlice("\x1b[3C"));
+    try std.testing.expectEqual(Action{ .move_cursor_relative = .{ .dir = .left, .n = 2 } }, parser.feedSlice("\x1b[2D"));
+}
+
+test "ESC[J erase display" {
+    var parser = Parser{};
+    try std.testing.expectEqual(Action{ .erase_display = .to_end }, parser.feedSlice("\x1b[J"));
+    try std.testing.expectEqual(Action{ .erase_display = .to_end }, parser.feedSlice("\x1b[0J"));
+    try std.testing.expectEqual(Action{ .erase_display = .to_start }, parser.feedSlice("\x1b[1J"));
+    try std.testing.expectEqual(Action{ .erase_display = .all }, parser.feedSlice("\x1b[2J"));
+}
+
+test "ESC[K erase line" {
+    var parser = Parser{};
+    try std.testing.expectEqual(Action{ .erase_line = .to_end }, parser.feedSlice("\x1b[K"));
+    try std.testing.expectEqual(Action{ .erase_line = .all }, parser.feedSlice("\x1b[2K"));
+}

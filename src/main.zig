@@ -47,9 +47,7 @@ pub fn main() !void {
         const shell = std.posix.getenvZ("SHELL") orelse "/bin/sh";
 
         const argv = [_:null]?[*:0]const u8{shell};
-        const envp = [_:null]?[*:0]const u8{"TERM=xterm-256color"};
-        // TODO handle error
-        return std.posix.execvpeZ(shell, &argv, &envp);
+        return std.posix.execvpeZ(shell, &argv, std.c.environ);
     } else {
         // Master
         var fds = [_]std.posix.pollfd{
